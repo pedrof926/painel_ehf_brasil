@@ -7,11 +7,11 @@ import plotly.express as px
 import math
 from datetime import date
 
-# ================== CAMINHOS ==================
-PASTA = Path(r"C:\Users\pedro.sneto\Downloads")
+# ================== CAMINHOS (RELATIVOS) ==================
+PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
-GEOJSON_MUN = Path(r"C:\Users\pedro.sneto\Downloads\municipios_br.geojson")
+GEOJSON_MUN = PASTA / "municipios_br.geojson"
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
@@ -251,6 +251,8 @@ def initial_date_index():
 # ================== APP ==================
 app = Dash(__name__)
 app.title = "Fator de Excesso de Calor (EHF) – Brasil"
+# necessário para o gunicorn (Render)
+server = app.server
 
 # Camadas
 layer_opts = [{"label":"EHF", "value":"ehf"}]
@@ -383,7 +385,7 @@ def cb_ufs(reg_key, ufs_val):
     Output("muni-filter","value"),
     Input("regiao-filter","value"),
     Input("uf-filter","value"),
-    Input("mapa","clickData"),          # <-- clique no mapa
+    Input("mapa","clickData"),
     State("muni-filter","value")
 )
 def cb_munis(reg_key, uf_keys, clickData, mval):
@@ -660,7 +662,7 @@ def exportar_risco_full(n_clicks):
         fname = f"risco_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
-# ================== RUN ==================
+# ================== RUN (local) ==================
 if __name__ == "__main__":
     import socket
 
@@ -702,5 +704,7 @@ if __name__ == "__main__":
         dev_tools_ui=False,
         dev_tools_props_check=False,
     )
+
+
 
 
