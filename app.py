@@ -1,19 +1,22 @@
 import json
 from pathlib import Path
+import math
+from datetime import date
+
 import numpy as np
 import pandas as pd
 from dash import Dash, dcc, html, Input, Output, State, callback, no_update
 import plotly.express as px
-import math
-from datetime import date
+
 
 # ================== CAMINHOS (RELATIVOS) ==================
 PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
 
-# Usaremos APENAS o simplificado (.json)
+# >>> usa APENAS o simplificado em JSON <<<
 GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"
+
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
@@ -23,6 +26,7 @@ RISK_ORDER  = ["Normal","Baixo","Moderado","Alto","Muito alto"]
 RISK_COLORS = {"Normal":"#2E7D32","Baixo":"#65A30D","Moderado":"#FACC15","Alto":"#FB923C","Muito alto":"#DC2626"}
 
 BARS_COLORS = {"Tmín":"#BFDBFE","Tméd":"#60A5FA","Tmáx":"#1E3A8A"}
+
 
 # ================== MAPAS AUXILIARES ==================
 PREFIXO_UF = {"11":"RO","12":"AC","13":"AM","14":"RR","15":"PA","16":"AP","17":"TO",
@@ -38,6 +42,7 @@ UF_REGIAO = {"AC":"Norte","AP":"Norte","AM":"Norte","PA":"Norte","RO":"Norte","R
              "ES":"Sudeste","MG":"Sudeste","RJ":"Sudeste","SP":"Sudeste",
              "PR":"Sul","RS":"Sul","SC":"Sul"}
 
+
 # ================== HELPERS ==================
 def z7(s: pd.Series) -> pd.Series:
     return pd.Series(s, dtype=str).str.extract(r"(\d+)")[0].str.zfill(7)
@@ -50,13 +55,19 @@ def norm_key(x: pd.Series) -> pd.Series:
 def carregar_geojson_cdmun(path: Path):
     with open(path, "r", encoding="utf-8") as f:
         gj = json.load(f)
-    # Garante CD_MUN no properties e id string-7 em cada feature
+
+    # normaliza CD_MUN nas PROPRIEDADES
+    keys = ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","Id","ID"]
     for ft in gj.get("features", []):
-        props = ft.get("properties", {}) or {}
-        cd = "".join(ch for ch in str(props.get("CD_MUN","")).strip() if ch.isdigit()).zfill(7)
-        props["CD_MUN"] = cd
-        ft["properties"] = props
-        ft["id"] = cd
+        p = ft.get("properties", {}) or {}
+        cd = None
+        for k in keys:
+            if k in p and str(p[k]).strip():
+                cd = p[k]; break
+        if cd is None:
+            continue
+        p["CD_MUN"] = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
+        ft["properties"] = p
     return gj
 
 def lookup_nomes_from_geojson(gj):
@@ -117,7 +128,7 @@ def build_combined_risk(df: pd.DataFrame):
         return df, False
     d = df.copy()
     geoses_num = pd.to_numeric(d["GeoSES"], errors="coerce")
-    d["V"] = ((1 - geoses_num) / 2).clip(0, 1)
+    d["V"] = ((1 - geoses_num) / 2).clip(0, 1)  # vulnerabilidade social (0=baixa,1=alta)
     H = (d["EHF"].clip(lower=0)) / d.get("EHF99").replace(0, np.nan)
     d["H_norm"] = H.clip(0, 1).fillna(0)
     d["risk_index"] = 0.5*d["H_norm"] + 0.5*d["V"]
@@ -172,6 +183,7 @@ def bbox_to_center_zoom(bbox, width=1100, height=650, padding=0.06):
     zoom = min(lon_zoom, lat_zoom) - math.log2(1 + 2*padding)
     return {"lat": lat_center, "lon": lon_center}, float(max(min(zoom, 10), 2.5))
 
+
 # ================== DADOS ==================
 prev = pd.read_excel(ARQ_PREV, engine="openpyxl")
 attr = pd.read_excel(ARQ_ATTR, engine="openpyxl")
@@ -187,35 +199,28 @@ attr = attr[[c for c in keep_attr if c in attr.columns]].drop_duplicates("CD_MUN
 
 base = prev.merge(attr, on="CD_MUN", how="left")
 
-# Garante tipo string-7 sempre
-base["CD_MUN"] = base["CD_MUN"].astype(str).str.zfill(7)
-
-# GeoJSON simplificado (.json)
+# GeoJSON – só o simplificado em JSON
 if not GEOJSON_PATH.exists():
-    raise FileNotFoundError(f"Arquivo não encontrado: {GEOJSON_PATH}")
+    raise FileNotFoundError(f"GeoJSON de municípios não encontrado: {GEOJSON_PATH}")
 GJ = carregar_geojson_cdmun(GEOJSON_PATH)
 NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
 
-# BBOX por município (usa feature.id)
+# BBOX por município
 BBOX_BY_MUN = {}
 for ft in GJ.get("features", []):
-    cd = str(ft.get("id","")).zfill(7)
+    props = ft.get("properties", {}) or {}
+    cd = str(props.get("CD_MUN","")).zfill(7)
     bb = _geom_bbox(ft.get("geometry"))
     if cd and bb:
         BBOX_BY_MUN[cd] = bb
 
-# Checagem de sanidade no log
-_geo_ids = {ft["id"] for ft in GJ.get("features", []) if "id" in ft}
-_df_ids  = set(map(str, base["CD_MUN"].unique()))
-print(f"[EHF] Geo feats: {len(_geo_ids)} | DF cds: {len(_df_ids)} | Intersec: {len(_geo_ids & _df_ids)}")
-
-# Enriquecimentos de nomes/UF/Região
-uf_by_cd          = base["CD_MUN"].str[:2].map(PREFIXO_UF)
-base["SIGLA_UF"]  = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
+base["CD_MUN"]   = z7(base["CD_MUN"])
+uf_by_cd         = base["CD_MUN"].str[:2].map(PREFIXO_UF)
+base["SIGLA_UF"] = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
 base["NM_REGIAO"] = base.get("NM_REGIAO", base["SIGLA_UF"].map(UF_REGIAO)).fillna(base["SIGLA_UF"].map(UF_REGIAO))
-base["NM_MUN"]    = base.get("NM_MUN", base["CD_MUN"].map(NOME_MUN_LOOKUP))
-base["NM_MUN"]    = base["NM_MUN"].fillna(base["CD_MUN"].map(NOME_MUN_LOOKUP))
-base["NM_MUN"]    = base["NM_MUN"].fillna("Município " + base["CD_MUN"])
+base["NM_MUN"] = base.get("NM_MUN", base["CD_MUN"].map(NOME_MUN_LOOKUP))
+base["NM_MUN"] = base["NM_MUN"].fillna(base["CD_MUN"].map(NOME_MUN_LOOKUP))
+base["NM_MUN"] = base["NM_MUN"].fillna("Município " + base["CD_MUN"])
 
 base["UF_KEY"]  = base["SIGLA_UF"]
 base["REG_KEY"] = norm_key(base["NM_REGIAO"])
@@ -225,7 +230,13 @@ base = calc_ehf(base)
 base = classify_by_ratio(base)
 base, HAS_RISK = build_combined_risk(base)
 
-# Default Brasília
+# Diagnóstico no log – garante que o join é ok
+geo_codes = {str(ft.get("properties", {}).get("CD_MUN","")).zfill(7) for ft in GJ.get("features", [])}
+df_codes  = set(base["CD_MUN"].astype(str).str.zfill(7).unique())
+intersec  = geo_codes.intersection(df_codes)
+print(f"[EHF] Geo feats: {len(geo_codes)} | DF cds: {len(df_codes)} | Intersec: {len(intersec)}")
+
+# Default para gráfico
 def busca_brasilia(df):
     c = df[(df["UF_KEY"]=="DF") & (df["NM_MUN"].str.upper().str.contains("BRASILIA|BRASÍLIA", na=False))]
     if not c.empty: return c.iloc[0]["CD_MUN"]
@@ -233,7 +244,7 @@ def busca_brasilia(df):
     return df["CD_MUN"].iloc[0]
 DEFAULT_MUN = busca_brasilia(base)
 
-# Opções de filtros
+# Opções dos filtros
 REG_OPTS = (base[["REG_KEY","NM_REGIAO"]].dropna().drop_duplicates()
             .sort_values("NM_REGIAO")
             .rename(columns={"REG_KEY":"value","NM_REGIAO":"label"})
@@ -253,6 +264,7 @@ def initial_date_index():
         return 0
     hoje = date.today()
     return DATES.index(hoje) if hoje in DATES else 0
+
 
 # ================== APP ==================
 app = Dash(__name__)
@@ -309,6 +321,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
             html.Hr(),
             html.Div("Consulta por classificação (dia atual)", style={"fontWeight":"700","margin":"6px 0"}),
             html.Div([
+                # EHF
                 html.Div([
                     html.Div([
                         html.Label("Classificação (EHF)"),
@@ -324,12 +337,14 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
+
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-ehf", n_clicks=0),
                         dcc.Download(id="dl-ehf"),
                     ], style={"marginTop":"6px","display":"flex","justifyContent":"flex-end"}),
                 ], style={"flex":"1","minWidth":"280px","marginRight":"8px"}),
 
+                # RISCO
                 html.Div([
                     html.Div([
                         html.Label("Risco combinado"),
@@ -346,6 +361,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
+
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-risk", n_clicks=0, disabled=(not HAS_RISK)),
                         dcc.Download(id="dl-risk"),
@@ -361,6 +377,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
         ], style={"flex":"2","paddingLeft":"8px"})
     ], style={"display":"flex","gap":"8px"})
 ])
+
 
 # ================== CALLBACKS ==================
 @callback(
@@ -434,9 +451,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
         df = df[df["REG_KEY"] == reg_key]
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
-
-    filter_muni_active = bool(muni_key)
-    if filter_muni_active:
+    if muni_key:
         df = df[df["CD_MUN"] == muni_key]
 
     if layer == "risk" and HAS_RISK:
@@ -459,13 +474,13 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
         vis,
         geojson=GJ,
         locations="CD_MUN",
-        featureidkey="id",          # <--- casa direto com feature.id
+        featureidkey="properties.CD_MUN",  # <<< CHAVE CERTA
         color=color_col,
         color_discrete_map=cmap,
         hover_name="muni_label",
         custom_data=["EHF","GeoSES","risk_index"],
         category_orders={color_col: ordem},
-        mapbox_style="carto-positron",
+        mapbox_style="open-street-map",    # <<< SEM TOKEN
         center={"lat": -15.7, "lon": -47.9},
         zoom=3.2,
         opacity=0.85
@@ -481,7 +496,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
 
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
     if apply_zoom and not vis.empty:
-        target_cds = [muni_key] if filter_muni_active else vis["CD_MUN"].astype(str).unique().tolist()
+        target_cds = [muni_key] if muni_key else vis["CD_MUN"].astype(str).unique().tolist()
         bbox = _union_bbox([BBOX_BY_MUN.get(cd) for cd in target_cds])
         if bbox:
             center, z = bbox_to_center_zoom(bbox, width=1100, height=650, padding=0.06)
@@ -551,6 +566,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
 
     return fig_map, fig_bar, cards, ehf_boxes
 
+
 # ===== CONSULTA POR CLASSE (listas) =====
 @callback(
     Output("ehf-cls-count","children"),
@@ -565,7 +581,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
 )
 def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
     if not DATES:
-        msg = html.Div("Nenhum município com os filtros atuais.", style={"color":"#6b7280"})
+        msg = html.Div("Nenhum município com los filtros atuais.", style={"color":"#6b7280"})
         return "", msg, "", msg
     dia = DATES[idx_date] if 0 <= idx_date < len(DATES) else DATES[-1]
     uf_keys = uf_keys or []
@@ -576,12 +592,14 @@ def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
 
+    # ----- EHF -----
     d_ehf = df[df["classification"] == ehf_cls].sort_values(["SIGLA_UF","NM_MUN"])
     c_ehf = len(d_ehf["CD_MUN"].unique())
     list_ehf = ([html.Div(f"{r.NM_MUN} / {r.SIGLA_UF}") for r in d_ehf.itertuples()]
                 or [html.Div("Nenhum município com os filtros atuais.", style={"color":"#6b7280"})])
     txt_ehf = f"{c_ehf} município(s) na categoria selecionada."
 
+    # ----- RISCO -----
     if "risk_class" in df.columns:
         d_risk = df[df["risk_class"] == risk_cls].sort_values(["SIGLA_UF","NM_MUN"])
         c_risk = len(d_risk["CD_MUN"].unique())
@@ -594,7 +612,8 @@ def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
 
     return txt_ehf, list_ehf, txt_risk, list_risk
 
-# ===== EXPORTAR XLSX (TODOS OS DIAS/TODOS MUNICÍPIOS) =====
+
+# ===== EXPORTAR XLSX =====
 def _df_export_full():
     df = base.copy()
     if "Tmean" not in df or df["Tmean"].dropna().empty:
@@ -650,11 +669,14 @@ def exportar_risco_full(n_clicks):
     fname = "risco_todas_datas.xlsx" if not DATES else f"risco_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
+
 # ================== RUN (local) ==================
 if __name__ == "__main__":
     import os
     PORT = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
