@@ -1,8 +1,9 @@
 # app.py
+import os
 import json
+import math
 from pathlib import Path
 from datetime import date
-import math
 
 import numpy as np
 import pandas as pd
@@ -50,7 +51,7 @@ def norm_key(x: pd.Series) -> pd.Series:
     return s
 
 def carregar_geojson_cdmun(path: Path):
-    """Carrega o JSON, garante CD_MUN como 7 dígitos, e seta feature['id']=CD_MUN."""
+    """Carrega o JSON, garante CD_MUN como 7 dígitos e seta feature['id']=CD_MUN."""
     if not path.exists():
         raise FileNotFoundError(f"Arquivo de municípios não encontrado: {path}")
     with open(path, "r", encoding="utf-8") as f:
@@ -65,37 +66,31 @@ def carregar_geojson_cdmun(path: Path):
     else:
         raise ValueError("JSON não é FeatureCollection nem lista de features.")
 
-    cand_keys = ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","ID","codigo","code"]
     new_feats = []
-    c_ok = 0
     for ft in feats:
         props = (ft.get("properties") or {}).copy()
-        # acha algum código
         cd = None
-        for k in cand_keys:
-            if k in props and str(props[k]).strip():
-                cd = props[k]
-                break
-        if cd is None and "id" in ft and str(ft["id"]).strip():
+        for k in ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","ID","codigo","code"]:
+            if props.get(k):
+                cd = props[k]; break
+        if not cd and ft.get("id"):
             cd = ft["id"]
-
-        if cd is None:
-            # sem código → não entra
+        if not cd:
             continue
 
         cd_str = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
-        props["CD_MUN"] = cd_str
-        # reduz propriedades para diminuir payload (mantém nome se existir)
         nm = props.get("NM_MUN") or props.get("name") or props.get("NOME") or None
         props = {"CD_MUN": cd_str, **({"NM_MUN": nm} if nm else {})}
-        ft2 = {"type": "Feature", "properties": props, "geometry": ft.get("geometry")}
-        # >>> ponto-chave: id no topo
-        ft2["id"] = cd_str
-        new_feats.append(ft2)
-        c_ok += 1
+
+        new_feats.append({
+            "type": "Feature",
+            "id": cd_str,                 # <<< ponto-chave para featureidkey="id"
+            "properties": props,
+            "geometry": ft.get("geometry")
+        })
 
     gj["features"] = new_feats
-    print(f"[GEO] features válidas: {c_ok}")
+    print(f"[GEO] features válidas: {len(new_feats)}")
     return gj
 
 def lookup_nomes_from_geojson(gj):
@@ -108,8 +103,7 @@ def lookup_nomes_from_geojson(gj):
         nm = None
         for k in name_keys:
             if k in p and str(p[k]).strip():
-                nm = str(p[k]).strip()
-                break
+                nm = str(p[k]).strip(); break
         if cd and nm:
             d[cd] = nm.title()
     d.setdefault("5300108", "Brasília")
@@ -187,13 +181,13 @@ for ft in GJ.get("features", []):
         BBOX_BY_MUN[cd] = bb
 
 # Deriva UF/Região e nomes
-base["CD_MUN"]   = z7(base["CD_MUN"]).astype(str)
-uf_by_cd         = base["CD_MUN"].str[:2].map(PREFIXO_UF)
-base["SIGLA_UF"] = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
+base["CD_MUN"] = z7(base["CD_MUN"]).astype(str)
+uf_by_cd = base["CD_MUN"].str[:2].map(PREFIXO_UF)
+base["SIGLA_UF"]  = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
 base["NM_REGIAO"] = base.get("NM_REGIAO", base["SIGLA_UF"].map(UF_REGIAO)).fillna(base["SIGLA_UF"].map(UF_REGIAO))
-base["NM_MUN"] = base.get("NM_MUN", base["CD_MUN"].map(NOME_MUN_LOOKUP))
-base["NM_MUN"] = base["NM_MUN"].fillna(base["CD_MUN"].map(NOME_MUN_LOOKUP))
-base["NM_MUN"] = base["NM_MUN"].fillna("Município " + base["CD_MUN"])
+base["NM_MUN"]    = base.get("NM_MUN", base["CD_MUN"].map(NOME_MUN_LOOKUP))
+base["NM_MUN"]    = base["NM_MUN"].fillna(base["CD_MUN"].map(NOME_MUN_LOOKUP))
+base["NM_MUN"]    = base["NM_MUN"].fillna("Município " + base["CD_MUN"])
 
 base["UF_KEY"]  = base["SIGLA_UF"]
 base["REG_KEY"] = norm_key(base["NM_REGIAO"])
@@ -435,10 +429,7 @@ def cb_munis(reg_key, uf_keys, clickData, mval):
         if clicked not in valid:
             clicked = None
 
-    if clicked:
-        val = clicked
-    else:
-        val = mval if (mval in valid) else None
+    val = clicked if clicked else (mval if (mval in valid) else None)
     return ops, val
 
 @callback(
@@ -486,12 +477,16 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     vis["CD_MUN"] = vis["CD_MUN"].astype(str).str.zfill(7)
     vis["muni_label"] = vis["NM_MUN"].astype(str) + " / " + vis["SIGLA_UF"].astype(str)
 
-    ids_set = set(vis["CD_MUN"].unique().tolist())
+    # GeoJSON subset + fallback
+    ids_set = set(vis["CD_MUN"].unique())
     feats_sub = [ft for ft in GJ.get("features", []) if str(ft.get("id","")).zfill(7) in ids_set]
+    if not feats_sub:
+        feats_sub = GJ.get("features", [])
     GJ_SUB = {"type":"FeatureCollection","features":feats_sub}
 
-    print(f"[MAP] vis rows: {len(vis)} | ids vis únicos: {len(ids_set)} | feats GJ_SUB: {len(feats_sub)}")
+    print(f"[MAP] vis rows: {len(vis)} | ids únicos: {len(ids_set)} | feats_sub: {len(feats_sub)}")
 
+    # Fallback de cor
     color_series = vis[color_col]
     if color_series.dropna().empty:
         vis["_fallback_color"] = "Sem dado"
@@ -503,31 +498,49 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
         cmap_plot = cmap
         orders_plot = ordem
 
-    fig_map = px.choropleth_mapbox(
-        vis,
-        geojson=GJ_SUB,
-        locations="CD_MUN",
-        featureidkey="id",           # <<< chave robusta
-        color=color_col_plot,
-        color_discrete_map=cmap_plot,
-        hover_name="muni_label",
-        custom_data=["EHF","GeoSES","risk_index"],
-        category_orders={color_col_plot: orders_plot},
-        mapbox_style="carto-positron",
-        center={"lat": -15.7, "lon": -47.9},
-        zoom=3.2,
-        opacity=0.85
-    )
+    use_maplibre = bool(int(os.environ.get("USE_MAPLIBRE", "0")))
+    if not use_maplibre:
+        fig_map = px.choropleth_mapbox(
+            vis,
+            geojson=GJ_SUB,
+            locations="CD_MUN",
+            featureidkey="id",  # <<< casa com feature["id"]
+            color=color_col_plot,
+            color_discrete_map=cmap_plot,
+            hover_name="muni_label",
+            custom_data=["EHF","GeoSES","risk_index"],
+            category_orders={color_col_plot: orders_plot},
+            mapbox_style="carto-positron",
+            center={"lat": -15.7, "lon": -47.9},
+            zoom=3.2,
+            opacity=0.85
+        )
+    else:
+        fig_map = px.choropleth_map(
+            vis,
+            geojson=GJ_SUB,
+            locations="CD_MUN",
+            featureidkey="id",
+            color=color_col_plot,
+            color_discrete_map=cmap_plot,
+            hover_name="muni_label",
+            custom_data=["EHF","GeoSES","risk_index"],
+            category_orders={color_col_plot: orders_plot},
+            scope="south america",
+            center={"lat": -15.7, "lon": -47.9},
+        )
+        fig_map.update_geos(fitbounds="locations", visible=False)
 
     fig_map.update_traces(
         marker_line_width=0.20, marker_line_color="#000000",
-        hovertemplate="<b>%{hovertext}</b><br>" +
-                      "EHF: %{customdata[0]:.1f}<br>" +
-                      "GeoSES: %{customdata[1]:.2f}<br>" +
+        hovertemplate="<b>%{hovertext}</b><br>"
+                      "EHF: %{customdata[0]:.1f}<br>"
+                      "GeoSES: %{customdata[1]:.2f}<br>"
                       "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
     )
     fig_map.update_layout(clickmode="event+select")
 
+    # Auto-zoom conforme filtros
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
     if apply_zoom and not vis.empty:
         target_cds = [muni_key] if filter_muni_active else vis["CD_MUN"].astype(str).unique().tolist()
@@ -705,9 +718,10 @@ def exportar_risco_full(n_clicks):
 
 # ================== RUN ==================
 if __name__ == "__main__":
-    import os
     PORT = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
