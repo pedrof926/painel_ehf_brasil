@@ -8,15 +8,11 @@ import pandas as pd
 from dash import Dash, dcc, html, Input, Output, State, callback, no_update
 import plotly.express as px
 
-
 # ================== CAMINHOS (RELATIVOS) ==================
 PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
-
-# >>> usa APENAS o simplificado em JSON <<<
-GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"
-
+GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"  # USAR APENAS ESTE
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
@@ -26,7 +22,6 @@ RISK_ORDER  = ["Normal","Baixo","Moderado","Alto","Muito alto"]
 RISK_COLORS = {"Normal":"#2E7D32","Baixo":"#65A30D","Moderado":"#FACC15","Alto":"#FB923C","Muito alto":"#DC2626"}
 
 BARS_COLORS = {"Tmín":"#BFDBFE","Tméd":"#60A5FA","Tmáx":"#1E3A8A"}
-
 
 # ================== MAPAS AUXILIARES ==================
 PREFIXO_UF = {"11":"RO","12":"AC","13":"AM","14":"RR","15":"PA","16":"AP","17":"TO",
@@ -42,7 +37,6 @@ UF_REGIAO = {"AC":"Norte","AP":"Norte","AM":"Norte","PA":"Norte","RO":"Norte","R
              "ES":"Sudeste","MG":"Sudeste","RJ":"Sudeste","SP":"Sudeste",
              "PR":"Sul","RS":"Sul","SC":"Sul"}
 
-
 # ================== HELPERS ==================
 def z7(s: pd.Series) -> pd.Series:
     return pd.Series(s, dtype=str).str.extract(r"(\d+)")[0].str.zfill(7)
@@ -51,41 +45,6 @@ def norm_key(x: pd.Series) -> pd.Series:
     s = pd.Series(x, dtype=str).str.normalize("NFKD").str.encode("ascii","ignore").str.decode("ascii")
     s = s.str.lower().str.replace(r"[^a-z0-9]+", "_", regex=True).str.strip("_")
     return s
-
-def carregar_geojson_cdmun(path: Path):
-    with open(path, "r", encoding="utf-8") as f:
-        gj = json.load(f)
-
-    # normaliza CD_MUN nas PROPRIEDADES
-    keys = ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","Id","ID"]
-    for ft in gj.get("features", []):
-        p = ft.get("properties", {}) or {}
-        cd = None
-        for k in keys:
-            if k in p and str(p[k]).strip():
-                cd = p[k]; break
-        if cd is None:
-            continue
-        p["CD_MUN"] = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
-        ft["properties"] = p
-    return gj
-
-def lookup_nomes_from_geojson(gj):
-    name_keys = ["NM_MUN","NM_MUNICIP","NM_MUNICIPIO","NM_MUNIC","NM_NOME",
-                 "NOME_MUN","NOME","name","Name","municipio","MUNICIPIO"]
-    d = {}
-    for ft in gj.get("features", []):
-        p = ft.get("properties", {}) or {}
-        cd = str(p.get("CD_MUN","")).zfill(7)
-        nm = None
-        for k in name_keys:
-            if k in p and str(p[k]).strip():
-                nm = str(p[k]).strip()
-                break
-        if cd and nm:
-            d[cd] = nm.title()
-    d.setdefault("5300108", "Brasília")
-    return d
 
 def calc_ehf(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["CD_MUN","data"]).reset_index(drop=True)
@@ -183,7 +142,6 @@ def bbox_to_center_zoom(bbox, width=1100, height=650, padding=0.06):
     zoom = min(lon_zoom, lat_zoom) - math.log2(1 + 2*padding)
     return {"lat": lat_center, "lon": lon_center}, float(max(min(zoom, 10), 2.5))
 
-
 # ================== DADOS ==================
 prev = pd.read_excel(ARQ_PREV, engine="openpyxl")
 attr = pd.read_excel(ARQ_ATTR, engine="openpyxl")
@@ -199,21 +157,50 @@ attr = attr[[c for c in keep_attr if c in attr.columns]].drop_duplicates("CD_MUN
 
 base = prev.merge(attr, on="CD_MUN", how="left")
 
-# GeoJSON – só o simplificado em JSON
+# --- GeoJSON: usa APENAS o simplificado .json ---
 if not GEOJSON_PATH.exists():
     raise FileNotFoundError(f"GeoJSON de municípios não encontrado: {GEOJSON_PATH}")
-GJ = carregar_geojson_cdmun(GEOJSON_PATH)
-NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
+
+with open(GEOJSON_PATH, "r", encoding="utf-8") as f:
+    GJ_FULL = json.load(f)
+
+# normaliza CD_MUN dentro das features como string de 7 dígitos
+for ft in GJ_FULL.get("features", []):
+    p = ft.get("properties", {}) or {}
+    raw = p.get("CD_MUN", "")
+    raw = "".join(ch for ch in str(raw) if ch.isdigit())
+    p["CD_MUN"] = raw.zfill(7)
+    ft["properties"] = p
+
+def lookup_nomes_from_geojson(gj):
+    name_keys = ["NM_MUN","NM_MUNICIP","NM_MUNICIPIO","NM_MUNIC","NM_NOME",
+                 "NOME_MUN","NOME","name","Name","municipio","MUNICIPIO"]
+    d = {}
+    for ft in gj.get("features", []):
+        p = ft.get("properties", {}) or {}
+        cd = str(p.get("CD_MUN", "")).zfill(7)
+        nm = None
+        for k in name_keys:
+            if k in p and str(p[k]).strip():
+                nm = str(p[k]).strip()
+                break
+        if cd and nm:
+            d[cd] = nm.title()
+    d.setdefault("5300108", "Brasília")
+    return d
+
+NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ_FULL)
 
 # BBOX por município
 BBOX_BY_MUN = {}
-for ft in GJ.get("features", []):
+for ft in GJ_FULL.get("features", []):
     props = ft.get("properties", {}) or {}
     cd = str(props.get("CD_MUN","")).zfill(7)
     bb = _geom_bbox(ft.get("geometry"))
     if cd and bb:
         BBOX_BY_MUN[cd] = bb
 
+# completar base
 base["CD_MUN"]   = z7(base["CD_MUN"])
 uf_by_cd         = base["CD_MUN"].str[:2].map(PREFIXO_UF)
 base["SIGLA_UF"] = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
@@ -230,13 +217,12 @@ base = calc_ehf(base)
 base = classify_by_ratio(base)
 base, HAS_RISK = build_combined_risk(base)
 
-# Diagnóstico no log – garante que o join é ok
-geo_codes = {str(ft.get("properties", {}).get("CD_MUN","")).zfill(7) for ft in GJ.get("features", [])}
-df_codes  = set(base["CD_MUN"].astype(str).str.zfill(7).unique())
-intersec  = geo_codes.intersection(df_codes)
-print(f"[EHF] Geo feats: {len(geo_codes)} | DF cds: {len(df_codes)} | Intersec: {len(intersec)}")
+# Log de cobertura p/ sanity-check
+geo_cds = {ft["properties"]["CD_MUN"] for ft in GJ_FULL["features"]}
+df_cds  = set(base["CD_MUN"].astype(str).str.zfill(7).unique())
+print(f"[EHF] Geo feats: {len(geo_cds)} | DF cds: {len(df_cds)} | Intersec: {len(geo_cds & df_cds)}")
 
-# Default para gráfico
+# Default Brasília para o gráfico
 def busca_brasilia(df):
     c = df[(df["UF_KEY"]=="DF") & (df["NM_MUN"].str.upper().str.contains("BRASILIA|BRASÍLIA", na=False))]
     if not c.empty: return c.iloc[0]["CD_MUN"]
@@ -244,7 +230,7 @@ def busca_brasilia(df):
     return df["CD_MUN"].iloc[0]
 DEFAULT_MUN = busca_brasilia(base)
 
-# Opções dos filtros
+# Opções filtros
 REG_OPTS = (base[["REG_KEY","NM_REGIAO"]].dropna().drop_duplicates()
             .sort_values("NM_REGIAO")
             .rename(columns={"REG_KEY":"value","NM_REGIAO":"label"})
@@ -260,16 +246,14 @@ UF_OPTS_ALL = (base[["UF_KEY","SIGLA_UF"]].dropna().drop_duplicates()
 DATES = sorted(base["data"].dropna().dt.date.unique().tolist())
 
 def initial_date_index():
-    if not DATES:
-        return 0
+    if not DATES: return 0
     hoje = date.today()
     return DATES.index(hoje) if hoje in DATES else 0
-
 
 # ================== APP ==================
 app = Dash(__name__)
 app.title = "Fator de Excesso de Calor (EHF) – Brasil"
-server = app.server  # para gunicorn
+server = app.server  # necessário para gunicorn
 
 # Camadas
 layer_opts = [{"label":"EHF", "value":"ehf"}]
@@ -311,7 +295,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
     ], style={"display":"flex","gap":"10px","alignItems":"center","marginBottom":"10px","flexWrap":"wrap"}),
 
     html.Div([
-        # ========== COL ESQUERDA: MAPA + CARDS ==========
+        # Esquerda
         html.Div([
             dcc.Graph(id="mapa", style={"height":"58vh","marginBottom":"8px"}, config={"scrollZoom": True}),
             html.Div(id="cards-ehf",
@@ -321,7 +305,6 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
             html.Hr(),
             html.Div("Consulta por classificação (dia atual)", style={"fontWeight":"700","margin":"6px 0"}),
             html.Div([
-                # EHF
                 html.Div([
                     html.Div([
                         html.Label("Classificação (EHF)"),
@@ -337,14 +320,12 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
-
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-ehf", n_clicks=0),
                         dcc.Download(id="dl-ehf"),
                     ], style={"marginTop":"6px","display":"flex","justifyContent":"flex-end"}),
                 ], style={"flex":"1","minWidth":"280px","marginRight":"8px"}),
 
-                # RISCO
                 html.Div([
                     html.Div([
                         html.Label("Risco combinado"),
@@ -361,7 +342,6 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
-
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-risk", n_clicks=0, disabled=(not HAS_RISK)),
                         dcc.Download(id="dl-risk"),
@@ -370,14 +350,13 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
             ], style={"display":"flex","gap":"8px","flexWrap":"wrap"})
         ], style={"flex":"3","paddingRight":"8px"}),
 
-        # ========== COL DIREITA: GRÁFICO + EHF POR DIA ==========
+        # Direita
         html.Div([
             dcc.Graph(id="serie-municipio", style={"height":"50vh","marginBottom":"10px"}),
             html.Div(id="ehf-dia", style={"display":"grid","gridTemplateColumns":"repeat(5, 1fr)","gap":"6px"})
         ], style={"flex":"2","paddingLeft":"8px"})
     ], style={"display":"flex","gap":"8px"})
 ])
-
 
 # ================== CALLBACKS ==================
 @callback(
@@ -451,7 +430,9 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
         df = df[df["REG_KEY"] == reg_key]
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
-    if muni_key:
+
+    filter_muni_active = bool(muni_key)
+    if filter_muni_active:
         df = df[df["CD_MUN"] == muni_key]
 
     if layer == "risk" and HAS_RISK:
@@ -470,41 +451,62 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     vis["CD_MUN"] = vis["CD_MUN"].astype(str).str.zfill(7)
     vis["muni_label"] = vis["NM_MUN"].astype(str) + " / " + vis["SIGLA_UF"].astype(str)
 
-    fig_map = px.choropleth_mapbox(
-        vis,
-        geojson=GJ,
-        locations="CD_MUN",
-        featureidkey="properties.CD_MUN",  # <<< CHAVE CERTA
-        color=color_col,
-        color_discrete_map=cmap,
-        hover_name="muni_label",
-        custom_data=["EHF","GeoSES","risk_index"],
-        category_orders={color_col: ordem},
-        mapbox_style="open-street-map",    # <<< SEM TOKEN
-        center={"lat": -15.7, "lon": -47.9},
-        zoom=3.2,
-        opacity=0.85
-    )
-    fig_map.update_traces(
-        marker_line_width=0.2, marker_line_color="#000000",
-        hovertemplate="<b>%{hovertext}</b><br>" +
-                      "EHF: %{customdata[0]:.1f}<br>" +
-                      "GeoSES: %{customdata[1]:.2f}<br>" +
-                      "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
-    )
-    fig_map.update_layout(clickmode="event+select")
+    # GeoJSON subset só com os municípios visíveis
+    ids_visiveis = set(vis["CD_MUN"].unique().tolist())
+    feats = [ft for ft in GJ_FULL["features"]
+             if str(ft["properties"].get("CD_MUN","")).zfill(7) in ids_visiveis]
+    if not feats:  # evita mapa branco
+        feats = GJ_FULL["features"]
+    GJ_SUB = {"type": "FeatureCollection", "features": feats}
 
+    # Tenta com mapbox; fallback sem mapbox se necessário
+    try:
+        fig_map = px.choropleth_mapbox(
+            vis,
+            geojson=GJ_SUB,
+            locations="CD_MUN",
+            featureidkey="properties.CD_MUN",
+            color=color_col,
+            color_discrete_map=cmap,
+            hover_name="muni_label",
+            custom_data=["EHF","GeoSES","risk_index"],
+            category_orders={color_col: ordem},
+            mapbox_style="carto-positron",
+            center={"lat": -15.7, "lon": -47.9},
+            zoom=3.2 if not filter_muni_active else 5.5,
+            opacity=0.85,
+        )
+        fig_map.update_traces(
+            marker_line_width=0.35,
+            marker_line_color="#000000",
+            hovertemplate="<b>%{hovertext}</b><br>EHF: %{customdata[0]:.1f}<br>GeoSES: %{customdata[1]:.2f}<br>Risco: %{customdata[2]:.2f}<extra></extra>",
+        )
+    except Exception:
+        fig_map = px.choropleth(
+            vis,
+            geojson=GJ_SUB,
+            locations="CD_MUN",
+            featureidkey="properties.CD_MUN",
+            color=color_col,
+            color_discrete_map=cmap,
+            hover_name="muni_label",
+            category_orders={color_col: ordem},
+        )
+
+    # Auto-zoom
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
     if apply_zoom and not vis.empty:
-        target_cds = [muni_key] if muni_key else vis["CD_MUN"].astype(str).unique().tolist()
-        bbox = _union_bbox([BBOX_BY_MUN.get(cd) for cd in target_cds])
+        alvo = [muni_key] if filter_muni_active else vis["CD_MUN"].astype(str).tolist()
+        bbox = _union_bbox([BBOX_BY_MUN.get(cd) for cd in alvo])
         if bbox:
             center, z = bbox_to_center_zoom(bbox, width=1100, height=650, padding=0.06)
             fig_map.update_layout(mapbox_center=center, mapbox_zoom=z)
 
-    fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0},
-                          legend_title_text=legend_title,
-                          uirevision=f"reg:{reg_key}|ufs:{','.join(uf_keys)}|mun:{muni_key or ''}")
+    fig_map.update_layout(
+        margin=dict(r=0, t=0, l=0, b=0),
+        legend_title_text=legend_title,
+        uirevision=f"reg:{reg_key}|ufs:{','.join(uf_keys)}|mun:{muni_key or ''}",
+    )
 
     # ====== BARRAS MUNICÍPIO ======
     muni_sel = muni_key if muni_key else DEFAULT_MUN
@@ -521,7 +523,10 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
              .dropna(subset=["data"]).sort_values("data"))
 
     MES = {1:"JAN",2:"FEV",3:"MAR",4:"ABR",5:"MAI",6:"JUN",7:"JUL",8:"AGO",9:"SET",10:"OUT",11:"NOV",12:"DEZ"}
-    serie["data_lbl"] = serie["data"].dt.day.astype(str).str.zfill(2) + " " + serie["data"].dt.month.map(MES)
+    if not serie.empty:
+        serie["data_lbl"] = serie["data"].dt.day.astype(str).str.zfill(2) + " " + serie["data"].dt.month.map(MES)
+    else:
+        serie["data_lbl"] = []
 
     bt = serie.melt(id_vars=["data","data_lbl","NM_MUN","SIGLA_UF"], value_vars=["Tmin","Tmean","Tmax"],
                     var_name="Série", value_name="Valor")
@@ -566,7 +571,6 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
 
     return fig_map, fig_bar, cards, ehf_boxes
 
-
 # ===== CONSULTA POR CLASSE (listas) =====
 @callback(
     Output("ehf-cls-count","children"),
@@ -581,7 +585,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
 )
 def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
     if not DATES:
-        msg = html.Div("Nenhum município com los filtros atuais.", style={"color":"#6b7280"})
+        msg = html.Div("Nenhum município com os filtros atuais.", style={"color":"#6b7280"})
         return "", msg, "", msg
     dia = DATES[idx_date] if 0 <= idx_date < len(DATES) else DATES[-1]
     uf_keys = uf_keys or []
@@ -592,14 +596,14 @@ def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
 
-    # ----- EHF -----
+    # EHF
     d_ehf = df[df["classification"] == ehf_cls].sort_values(["SIGLA_UF","NM_MUN"])
     c_ehf = len(d_ehf["CD_MUN"].unique())
     list_ehf = ([html.Div(f"{r.NM_MUN} / {r.SIGLA_UF}") for r in d_ehf.itertuples()]
                 or [html.Div("Nenhum município com os filtros atuais.", style={"color":"#6b7280"})])
     txt_ehf = f"{c_ehf} município(s) na categoria selecionada."
 
-    # ----- RISCO -----
+    # Risco
     if "risk_class" in df.columns:
         d_risk = df[df["risk_class"] == risk_cls].sort_values(["SIGLA_UF","NM_MUN"])
         c_risk = len(d_risk["CD_MUN"].unique())
@@ -611,7 +615,6 @@ def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
         txt_risk = ""
 
     return txt_ehf, list_ehf, txt_risk, list_risk
-
 
 # ===== EXPORTAR XLSX =====
 def _df_export_full():
@@ -645,36 +648,27 @@ def _df_export_full():
     out["Data"] = pd.to_datetime(out["Data"]).dt.date
     return out
 
-@callback(
-    Output("dl-ehf", "data"),
-    Input("btn-export-ehf", "n_clicks"),
-    prevent_initial_call=True
-)
+@callback(Output("dl-ehf", "data"), Input("btn-export-ehf", "n_clicks"), prevent_initial_call=True)
 def exportar_ehf_full(n_clicks):
-    if not n_clicks:
-        return no_update
+    if not n_clicks: return no_update
     out = _df_export_full()
     fname = "ehf_todas_datas.xlsx" if not DATES else f"ehf_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
-@callback(
-    Output("dl-risk", "data"),
-    Input("btn-export-risk", "n_clicks"),
-    prevent_initial_call=True
-)
+@callback(Output("dl-risk", "data"), Input("btn-export-risk", "n_clicks"), prevent_initial_call=True)
 def exportar_risco_full(n_clicks):
-    if not n_clicks:
-        return no_update
+    if not n_clicks: return no_update
     out = _df_export_full()
     fname = "risco_todas_datas.xlsx" if not DATES else f"risco_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
-
-# ================== RUN (local) ==================
+# ================== RUN (local/Render) ==================
 if __name__ == "__main__":
     import os
     PORT = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
