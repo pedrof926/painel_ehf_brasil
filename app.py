@@ -3,18 +3,20 @@ import json
 from pathlib import Path
 from datetime import date
 import math
+import os
 
 import numpy as np
 import pandas as pd
 from dash import Dash, dcc, html, Input, Output, State, callback, no_update
 import plotly.express as px
+import plotly.graph_objects as go  # <-- para camada de contorno
 
 # ================== CAMINHOS (RELATIVOS) ==================
 PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
 
-# Somente o JSON simplificado
+# >>> USAR SOMENTE O SIMPLIFICADO EM JSON <<<
 GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"
 
 # ================== PALETAS & ORDENS ==================
@@ -50,52 +52,36 @@ def norm_key(x: pd.Series) -> pd.Series:
     return s
 
 def carregar_geojson_cdmun(path: Path):
-    """Carrega o JSON, garante CD_MUN como 7 dígitos, e seta feature['id']=CD_MUN."""
+    """Carrega o JSON e garante properties.CD_MUN (string de 7 dígitos)."""
     if not path.exists():
         raise FileNotFoundError(f"Arquivo de municípios não encontrado: {path}")
     with open(path, "r", encoding="utf-8") as f:
         gj = json.load(f)
 
-    # aceita FeatureCollection ou lista de features
     if isinstance(gj, dict) and "features" in gj:
         feats = gj.get("features", [])
     elif isinstance(gj, list):
         feats = gj
         gj = {"type": "FeatureCollection", "features": feats}
     else:
-        raise ValueError("JSON não é FeatureCollection nem lista de features.")
+        raise ValueError("JSON de municípios não tem formato de FeatureCollection nem lista de features.")
 
     cand_keys = ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","ID","codigo","code"]
-    new_feats = []
-    c_ok = 0
     for ft in feats:
-        props = (ft.get("properties") or {}).copy()
-        # acha algum código
+        props = ft.get("properties") or {}
         cd = None
         for k in cand_keys:
             if k in props and str(props[k]).strip():
-                cd = props[k]
-                break
+                cd = props[k]; break
         if cd is None and "id" in ft and str(ft["id"]).strip():
             cd = ft["id"]
-
         if cd is None:
-            # sem código → não entra
             continue
+        props["CD_MUN"] = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
+        ft["properties"] = props
 
-        cd_str = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
-        props["CD_MUN"] = cd_str
-        # reduz propriedades para diminuir payload (mantém nome se existir)
-        nm = props.get("NM_MUN") or props.get("name") or props.get("NOME") or None
-        props = {"CD_MUN": cd_str, **({"NM_MUN": nm} if nm else {})}
-        ft2 = {"type": "Feature", "properties": props, "geometry": ft.get("geometry")}
-        # >>> ponto-chave: id no topo
-        ft2["id"] = cd_str
-        new_feats.append(ft2)
-        c_ok += 1
-
-    gj["features"] = new_feats
-    print(f"[GEO] features válidas: {c_ok}")
+    c_ok = sum(1 for ft in feats if str(ft.get("properties",{}).get("CD_MUN","")).isdigit())
+    print(f"[GEO] features: {len(feats)} | com CD_MUN: {c_ok}")
     return gj
 
 def lookup_nomes_from_geojson(gj):
@@ -173,7 +159,7 @@ keep_attr = ["CD_MUN","NM_MUN","SIGLA_UF","NM_REGIAO","GeoSES",
 attr = attr[[c for c in keep_attr if c in attr.columns]].drop_duplicates("CD_MUN")
 base = prev.merge(attr, on="CD_MUN", how="left")
 
-# GeoJSON (com id=CD_MUN)
+# JSON dos municípios
 GJ = carregar_geojson_cdmun(GEOJSON_PATH)
 NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
 
@@ -240,7 +226,7 @@ def build_combined_risk(df: pd.DataFrame):
         return df, False
     d = df.copy()
     geoses_num = pd.to_numeric(d["GeoSES"], errors="coerce")
-    d["V"] = ((1 - geoses_num) / 2).clip(0, 1)
+    d["V"] = ((1 - geoses_num) / 2).clip(0, 1)  # 0=baixa,1=alta
     H = (d["EHF"].clip(lower=0)) / d.get("EHF99").replace(0, np.nan)
     d["H_norm"] = H.clip(0, 1).fillna(0)
     d["risk_index"] = 0.5*d["H_norm"] + 0.5*d["V"]
@@ -267,7 +253,7 @@ def initial_date_index():
 # ================== APP ==================
 app = Dash(__name__)
 app.title = "Fator de Excesso de Calor (EHF) – Brasil"
-server = app.server
+server = app.server  # para o gunicorn
 
 # Camadas
 layer_opts = [{"label":"EHF", "value":"ehf"}]
@@ -334,7 +320,6 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
             html.Div(id="cards-ehf",
                      style={"display":"grid","gridTemplateColumns":"repeat(4, 1fr)",
                             "gap":"8px","alignItems":"stretch","marginTop":"2px"}),
-
             html.Hr(),
             html.Div("Consulta por classificação (dia atual)", style={"fontWeight":"700","margin":"6px 0"}),
             html.Div([
@@ -353,7 +338,6 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
-
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-ehf", n_clicks=0),
                         dcc.Download(id="dl-ehf"),
@@ -376,7 +360,6 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
-
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-risk", n_clicks=0, disabled=(not HAS_RISK)),
                         dcc.Download(id="dl-risk"),
@@ -407,7 +390,7 @@ def cb_ufs(reg_key, ufs_val):
              .rename(columns={"UF_KEY":"value","SIGLA_UF":"label"})
              .loc[:, ["label","value"]]
              .to_dict("records"))
-    return ops, []
+    return ops, []  # limpa seleção quando muda a região
 
 @callback(
     Output("muni-filter","options"),
@@ -453,23 +436,25 @@ def cb_munis(reg_key, uf_keys, clickData, mval):
     Input("layer","value"),
 )
 def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
+    # ------- Data selecionada -------
     if not DATES:
         return px.scatter(), px.bar(), [], []
     dia = DATES[idx_date] if 0 <= idx_date < len(DATES) else DATES[-1]
     uf_keys = uf_keys or []
 
+    # ------- Base filtrada p/ o dia -------
     df = base[base["data"].dt.date == dia].copy()
     if reg_key:
         df = df[df["REG_KEY"] == reg_key]
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
-
     df["CD_MUN"] = z7(df["CD_MUN"]).astype(str)
 
     filter_muni_active = bool(muni_key)
     if filter_muni_active:
         df = df[df["CD_MUN"] == muni_key]
 
+    # ------- Coluna de cor -------
     if layer == "risk" and HAS_RISK:
         color_col = "risk_class"; cmap = RISK_COLORS; ordem = RISK_ORDER
         legend_title = "Risco combinado (EHF + GeoSES)"
@@ -486,12 +471,19 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     vis["CD_MUN"] = vis["CD_MUN"].astype(str).str.zfill(7)
     vis["muni_label"] = vis["NM_MUN"].astype(str) + " / " + vis["SIGLA_UF"].astype(str)
 
+    # ------- Subconjunto do GeoJSON contendo só os IDs do data frame -------
     ids_set = set(vis["CD_MUN"].unique().tolist())
-    feats_sub = [ft for ft in GJ.get("features", []) if str(ft.get("id","")).zfill(7) in ids_set]
+    feats_sub = []
+    for ft in GJ.get("features", []):
+        props = ft.get("properties", {}) or {}
+        cd = str(props.get("CD_MUN","")).zfill(7)
+        if cd in ids_set:
+            feats_sub.append(ft)
     GJ_SUB = {"type":"FeatureCollection","features":feats_sub}
 
     print(f"[MAP] vis rows: {len(vis)} | ids vis únicos: {len(ids_set)} | feats GJ_SUB: {len(feats_sub)}")
 
+    # ------- Fallback de cor -------
     color_series = vis[color_col]
     if color_series.dropna().empty:
         vis["_fallback_color"] = "Sem dado"
@@ -503,11 +495,12 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
         cmap_plot = cmap
         orders_plot = ordem
 
+    # ------- MAPA (camada de preenchimento) -------
     fig_map = px.choropleth_mapbox(
         vis,
         geojson=GJ_SUB,
         locations="CD_MUN",
-        featureidkey="id",           # <<< chave robusta
+        featureidkey="properties.CD_MUN",
         color=color_col_plot,
         color_discrete_map=cmap_plot,
         hover_name="muni_label",
@@ -519,8 +512,25 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
         opacity=0.85
     )
 
+    # ------- CAMADA DE CONTORNO (sempre desenha limites) -------
+    fig_map.add_trace(
+        go.Choroplethmapbox(
+            geojson=GJ_SUB,
+            locations=vis["CD_MUN"],
+            z=np.ones(len(vis)),  # valor dummy
+            featureidkey="properties.CD_MUN",
+            showscale=False,
+            marker_line_width=0.4,
+            marker_line_color="#111111",
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+            zmin=0, zmax=1,
+            opacity=0  # preenchimento transparente; contorno aparece via marker_line
+        )
+    )
+
+    # hover
     fig_map.update_traces(
-        marker_line_width=0.20, marker_line_color="#000000",
+        selector=dict(type="choroplethmapbox"),
         hovertemplate="<b>%{hovertext}</b><br>" +
                       "EHF: %{customdata[0]:.1f}<br>" +
                       "GeoSES: %{customdata[1]:.2f}<br>" +
@@ -528,6 +538,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     )
     fig_map.update_layout(clickmode="event+select")
 
+    # Auto-zoom conforme filtros
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
     if apply_zoom and not vis.empty:
         target_cds = [muni_key] if filter_muni_active else vis["CD_MUN"].astype(str).unique().tolist()
@@ -543,7 +554,13 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     )
 
     # ====== BARRAS MUNICÍPIO ======
-    muni_sel = muni_key if muni_key else DEFAULT_MUN
+    muni_sel = muni_key if muni_key else (vis["CD_MUN"].iloc[0] if not vis.empty else None)
+    if muni_sel is None:
+        fig_bar = px.bar(title="Previsão")
+        cards = []
+        ehf_boxes = []
+        return fig_map, fig_bar, cards, ehf_boxes
+
     dmun = base[base["CD_MUN"] == muni_sel].copy()
     if "Tmean" not in dmun or dmun["Tmean"].dropna().empty:
         if "Tmed" in dmun and not dmun["Tmed"].dropna().empty:
@@ -705,9 +722,10 @@ def exportar_risco_full(n_clicks):
 
 # ================== RUN ==================
 if __name__ == "__main__":
-    import os
     PORT = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
