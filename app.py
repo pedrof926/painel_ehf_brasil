@@ -12,6 +12,7 @@ PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
 GEOJSON_MUN = PASTA / "municipios_br.geojson"
+GEOJSON_SIMPL = PASTA / "municipios_br_simplificado.geojson"   # << preferido se existir
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
@@ -188,10 +189,11 @@ attr = attr[[c for c in keep_attr if c in attr.columns]].drop_duplicates("CD_MUN
 
 base = prev.merge(attr, on="CD_MUN", how="left")
 
-# GeoJSON, nomes e derivação UF/Região
-if not GEOJSON_MUN.exists():
-    raise FileNotFoundError(f"GeoJSON de municípios não encontrado: {GEOJSON_MUN}")
-GJ = carregar_geojson_cdmun(GEOJSON_MUN)
+# GeoJSON, nomes e derivação UF/Região (prefere simplificado)
+GEO_PATH = GEOJSON_SIMPL if GEOJSON_SIMPL.exists() else GEOJSON_MUN
+if not GEO_PATH.exists():
+    raise FileNotFoundError(f"GeoJSON de municípios não encontrado: {GEO_PATH}")
+GJ = carregar_geojson_cdmun(GEO_PATH)
 NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
 
 # BBOX por município
@@ -251,8 +253,7 @@ def initial_date_index():
 # ================== APP ==================
 app = Dash(__name__)
 app.title = "Fator de Excesso de Calor (EHF) – Brasil"
-# necessário para o gunicorn (Render)
-server = app.server
+server = app.server  # necessário para gunicorn
 
 # Camadas
 layer_opts = [{"label":"EHF", "value":"ehf"}]
@@ -377,8 +378,7 @@ def cb_ufs(reg_key, ufs_val):
              .rename(columns={"UF_KEY":"value","SIGLA_UF":"label"})
              .loc[:, ["label","value"]]
              .to_dict("records"))
-    # limpa seleção de UF quando muda região
-    return ops, []
+    return ops, []  # limpa seleção quando muda a região
 
 @callback(
     Output("muni-filter","options"),
@@ -436,7 +436,6 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
 
-    # quando município selecionado: mostrar só ele
     filter_muni_active = bool(muni_key)
     if filter_muni_active:
         df = df[df["CD_MUN"] == muni_key]
@@ -480,7 +479,6 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     )
     fig_map.update_layout(clickmode="event+select")
 
-    # Auto-zoom quando aplicar filtro geográfico
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
     if apply_zoom and not vis.empty:
         target_cds = [muni_key] if filter_muni_active else vis["CD_MUN"].astype(str).unique().tolist()
@@ -600,9 +598,7 @@ def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
 
 # ===== EXPORTAR XLSX (TODOS OS DIAS/TODOS MUNICÍPIOS) =====
 def _df_export_full():
-    """Monta dataframe com todas as datas e municípios, renomeando colunas para PT-BR."""
     df = base.copy()
-    # garante Tmean
     if "Tmean" not in df or df["Tmean"].dropna().empty:
         if "Tmed" in df and not df["Tmed"].dropna().empty:
             df["Tmean"] = df["Tmed"]
@@ -641,10 +637,7 @@ def exportar_ehf_full(n_clicks):
     if not n_clicks:
         return no_update
     out = _df_export_full()
-    if not DATES:
-        fname = "ehf_todas_datas.xlsx"
-    else:
-        fname = f"ehf_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
+    fname = "ehf_todas_datas.xlsx" if not DATES else f"ehf_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
 @callback(
@@ -656,54 +649,16 @@ def exportar_risco_full(n_clicks):
     if not n_clicks:
         return no_update
     out = _df_export_full()
-    if not DATES:
-        fname = "risco_todas_datas.xlsx"
-    else:
-        fname = f"risco_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
+    fname = "risco_todas_datas.xlsx" if not DATES else f"risco_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
-# ================== RUN (local) ==================
+# ================== RUN ==================
 if __name__ == "__main__":
-    import socket
+    import os
+    PORT = int(os.environ.get("PORT", 8050))  # Render define PORT; local = 8050
+    app.run(host="0.0.0.0", port=PORT)
 
-    PORT = 8069
-    HOST = "0.0.0.0"  # expõe na rede local
 
-    def discover_ips():
-        ips = set()
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ips.add(s.getsockname()[0])
-            s.close()
-        except Exception:
-            pass
-        try:
-            hostname = socket.gethostname()
-            for ip in socket.gethostbyname_ex(hostname)[2]:
-                if not ip.startswith("127."):
-                    ips.add(ip)
-        except Exception:
-            pass
-        return sorted(ips)
-
-    links = [f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"]
-    for ip in discover_ips():
-        links.append(f"http://{ip}:{PORT}")
-    links = list(dict.fromkeys(links))
-
-    print("\n>>> Acesse o painel pelos links abaixo:")
-    for url in links:
-        print("   -", url)
-    print("")
-
-    app.run(
-        host=HOST,
-        port=PORT,
-        debug=False,
-        dev_tools_ui=False,
-        dev_tools_props_check=False,
-    )
 
 
 
