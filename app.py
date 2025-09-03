@@ -11,22 +11,7 @@ from datetime import date
 PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
-
-# Preferir o simplificado (aceita .geojson ou .json); fallback para o completo
-GEO_CANDIDATES = [
-    PASTA / "municipios_br_simplificado.geojson",
-    PASTA / "municipios_br_simplificado.json",
-    PASTA / "municipios_br.geojson",
-]
-for _p in GEO_CANDIDATES:
-    if _p.exists():
-        GEO_PATH = _p
-        break
-else:
-    raise FileNotFoundError(
-        "GeoJSON de municípios não encontrado. Esperado um dos: "
-        + ", ".join(str(p.name) for p in GEO_CANDIDATES)
-    )
+GEOJSON_MUN = PASTA / "municipios_br_simplificado.json"   # <<< único usado
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
@@ -203,8 +188,11 @@ attr = attr[[c for c in keep_attr if c in attr.columns]].drop_duplicates("CD_MUN
 
 base = prev.merge(attr, on="CD_MUN", how="left")
 
-# GeoJSON, nomes e derivação UF/Região
-GJ = carregar_geojson_cdmun(GEO_PATH)
+# ---------- GeoJSON, nomes e derivação UF/Região ----------
+if not GEOJSON_MUN.exists():
+    raise FileNotFoundError(f"GeoJSON de municípios não encontrado: {GEOJSON_MUN}")
+
+GJ = carregar_geojson_cdmun(GEOJSON_MUN)
 NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
 
 # BBOX por município
@@ -232,7 +220,7 @@ base = calc_ehf(base)
 base = classify_by_ratio(base)
 base, HAS_RISK = build_combined_risk(base)
 
-# Default Brasília para o gráfico
+# Default Brasília para o gráfico (dropdown começa vazio)
 def busca_brasilia(df):
     c = df[(df["UF_KEY"]=="DF") & (df["NM_MUN"].str.upper().str.contains("BRASILIA|BRASÍLIA", na=False))]
     if not c.empty: return c.iloc[0]["CD_MUN"]
@@ -264,7 +252,7 @@ def initial_date_index():
 # ================== APP ==================
 app = Dash(__name__)
 app.title = "Fator de Excesso de Calor (EHF) – Brasil"
-server = app.server  # necessário para gunicorn/Render
+server = app.server  # necessário para gunicorn (Render)
 
 # Camadas
 layer_opts = [{"label":"EHF", "value":"ehf"}]
@@ -331,6 +319,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
+
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-ehf", n_clicks=0),
                         dcc.Download(id="dl-ehf"),
@@ -353,6 +342,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
+
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-risk", n_clicks=0, disabled=(not HAS_RISK)),
                         dcc.Download(id="dl-risk"),
@@ -571,7 +561,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
 )
 def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
     if not DATES:
-        msg = html.Div("Nenhum município com os filtros atuais.", style={"color":"#6b7280"})
+        msg = html.Div("Nenhum município com los filtros atuais.", style={"color":"#6b7280"})
         return "", msg, "", msg
     dia = DATES[idx_date] if 0 <= idx_date < len(DATES) else DATES[-1]
     uf_keys = uf_keys or []
@@ -582,14 +572,14 @@ def cb_listas(idx_date, reg_key, uf_keys, ehf_cls, risk_cls):
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
 
-    # ----- EHF -----
+    # EHF
     d_ehf = df[df["classification"] == ehf_cls].sort_values(["SIGLA_UF","NM_MUN"])
     c_ehf = len(d_ehf["CD_MUN"].unique())
     list_ehf = ([html.Div(f"{r.NM_MUN} / {r.SIGLA_UF}") for r in d_ehf.itertuples()]
                 or [html.Div("Nenhum município com os filtros atuais.", style={"color":"#6b7280"})])
     txt_ehf = f"{c_ehf} município(s) na categoria selecionada."
 
-    # ----- RISCO -----
+    # Risco combinado
     if "risk_class" in df.columns:
         d_risk = df[df["risk_class"] == risk_cls].sort_values(["SIGLA_UF","NM_MUN"])
         c_risk = len(d_risk["CD_MUN"].unique())
@@ -658,11 +648,13 @@ def exportar_risco_full(n_clicks):
     fname = "risco_todas_datas.xlsx" if not DATES else f"risco_{DATES[0].isoformat()}_a_{DATES[-1].isoformat()}.xlsx"
     return dcc.send_data_frame(out.to_excel, fname, index=False)
 
-# ================== RUN ==================
+# ================== RUN (local) ==================
 if __name__ == "__main__":
     import os
-    PORT = int(os.environ.get("PORT", 8050))  # Render define PORT; local usa 8050
+    PORT = int(os.environ.get("PORT", 8050))  # Render define PORT; local = 8050
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
