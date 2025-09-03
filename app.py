@@ -11,8 +11,22 @@ from datetime import date
 PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
-GEOJSON_MUN = PASTA / "municipios_br.geojson"
-GEOJSON_SIMPL = PASTA / "municipios_br_simplificado.geojson"   # << preferido se existir
+
+# Preferir o simplificado (aceita .geojson ou .json); fallback para o completo
+GEO_CANDIDATES = [
+    PASTA / "municipios_br_simplificado.geojson",
+    PASTA / "municipios_br_simplificado.json",
+    PASTA / "municipios_br.geojson",
+]
+for _p in GEO_CANDIDATES:
+    if _p.exists():
+        GEO_PATH = _p
+        break
+else:
+    raise FileNotFoundError(
+        "GeoJSON de municípios não encontrado. Esperado um dos: "
+        + ", ".join(str(p.name) for p in GEO_CANDIDATES)
+    )
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
@@ -189,10 +203,7 @@ attr = attr[[c for c in keep_attr if c in attr.columns]].drop_duplicates("CD_MUN
 
 base = prev.merge(attr, on="CD_MUN", how="left")
 
-# GeoJSON, nomes e derivação UF/Região (prefere simplificado)
-GEO_PATH = GEOJSON_SIMPL if GEOJSON_SIMPL.exists() else GEOJSON_MUN
-if not GEO_PATH.exists():
-    raise FileNotFoundError(f"GeoJSON de municípios não encontrado: {GEO_PATH}")
+# GeoJSON, nomes e derivação UF/Região
 GJ = carregar_geojson_cdmun(GEO_PATH)
 NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
 
@@ -221,7 +232,7 @@ base = calc_ehf(base)
 base = classify_by_ratio(base)
 base, HAS_RISK = build_combined_risk(base)
 
-# Default Brasília para o gráfico (dropdown começa vazio)
+# Default Brasília para o gráfico
 def busca_brasilia(df):
     c = df[(df["UF_KEY"]=="DF") & (df["NM_MUN"].str.upper().str.contains("BRASILIA|BRASÍLIA", na=False))]
     if not c.empty: return c.iloc[0]["CD_MUN"]
@@ -253,7 +264,7 @@ def initial_date_index():
 # ================== APP ==================
 app = Dash(__name__)
 app.title = "Fator de Excesso de Calor (EHF) – Brasil"
-server = app.server  # necessário para gunicorn
+server = app.server  # necessário para gunicorn/Render
 
 # Camadas
 layer_opts = [{"label":"EHF", "value":"ehf"}]
@@ -295,18 +306,16 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
     ], style={"display":"flex","gap":"10px","alignItems":"center","marginBottom":"10px","flexWrap":"wrap"}),
 
     html.Div([
-        # ========== COL ESQUERDA: MAPA + CARDS ==========
+        # ESQUERDA: MAPA + CARDS
         html.Div([
             dcc.Graph(id="mapa", style={"height":"58vh","marginBottom":"8px"}, config={"scrollZoom": True}),
             html.Div(id="cards-ehf",
                      style={"display":"grid","gridTemplateColumns":"repeat(4, 1fr)",
                             "gap":"8px","alignItems":"stretch","marginTop":"2px"}),
 
-            # ------ CONSULTA POR CLASSE (EHF & RISCO) ------
             html.Hr(),
             html.Div("Consulta por classificação (dia atual)", style={"fontWeight":"700","margin":"6px 0"}),
             html.Div([
-                # EHF
                 html.Div([
                     html.Div([
                         html.Label("Classificação (EHF)"),
@@ -322,14 +331,12 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
-
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-ehf", n_clicks=0),
                         dcc.Download(id="dl-ehf"),
                     ], style={"marginTop":"6px","display":"flex","justifyContent":"flex-end"}),
                 ], style={"flex":"1","minWidth":"280px","marginRight":"8px"}),
 
-                # RISCO
                 html.Div([
                     html.Div([
                         html.Label("Risco combinado"),
@@ -346,7 +353,6 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
                              style={"border":"1px solid #e5e7eb","borderRadius":"8px",
                                     "padding":"8px","minHeight":"48px","maxHeight":"24vh","overflowY":"auto",
                                     "backgroundColor":"#fff"}),
-
                     html.Div([
                         html.Button("Exportar XLSX (todos os dias)", id="btn-export-risk", n_clicks=0, disabled=(not HAS_RISK)),
                         dcc.Download(id="dl-risk"),
@@ -355,7 +361,7 @@ app.layout = html.Div(style={"fontFamily":"Inter, system-ui, Arial","padding":"1
             ], style={"display":"flex","gap":"8px","flexWrap":"wrap"})
         ], style={"flex":"3","paddingRight":"8px"}),
 
-        # ========== COL DIREITA: GRÁFICO + EHF POR DIA ==========
+        # DIREITA: GRÁFICO + EHF POR DIA
         html.Div([
             dcc.Graph(id="serie-municipio", style={"height":"50vh","marginBottom":"10px"}),
             html.Div(id="ehf-dia", style={"display":"grid","gridTemplateColumns":"repeat(5, 1fr)","gap":"6px"})
@@ -655,8 +661,10 @@ def exportar_risco_full(n_clicks):
 # ================== RUN ==================
 if __name__ == "__main__":
     import os
-    PORT = int(os.environ.get("PORT", 8050))  # Render define PORT; local = 8050
+    PORT = int(os.environ.get("PORT", 8050))  # Render define PORT; local usa 8050
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
