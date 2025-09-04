@@ -1,14 +1,14 @@
 # app.py
-import os
 import json
-import math
 from pathlib import Path
 from datetime import date
+import math
 
 import numpy as np
 import pandas as pd
 from dash import Dash, dcc, html, Input, Output, State, callback, no_update
 import plotly.express as px
+import plotly.graph_objects as go  # <- para combinarmos camadas
 
 # ================== CAMINHOS (RELATIVOS) ==================
 PASTA = Path(__file__).parent
@@ -20,10 +20,21 @@ GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
-COLOR_MAP   = {"Normal":"#2E7D32","Baixa intensidade":"#F1C40F","Severa":"#E67E22","Extrema":"#C0392B"}
+COLOR_MAP   = {
+    "Normal":"#A5D6A7",              # verde mais claro para o "tapete"
+    "Baixa intensidade":"#F1C40F",
+    "Severa":"#E67E22",
+    "Extrema":"#C0392B"
+}
 
 RISK_ORDER  = ["Normal","Baixo","Moderado","Alto","Muito alto"]
-RISK_COLORS = {"Normal":"#2E7D32","Baixo":"#65A30D","Moderado":"#FACC15","Alto":"#FB923C","Muito alto":"#DC2626"}
+RISK_COLORS = {
+    "Normal":"#A5D6A7",
+    "Baixo":"#65A30D",
+    "Moderado":"#FACC15",
+    "Alto":"#FB923C",
+    "Muito alto":"#DC2626"
+}
 
 BARS_COLORS = {"Tmín":"#BFDBFE","Tméd":"#60A5FA","Tmáx":"#1E3A8A"}
 
@@ -51,7 +62,7 @@ def norm_key(x: pd.Series) -> pd.Series:
     return s
 
 def carregar_geojson_cdmun(path: Path):
-    """Carrega o JSON, garante CD_MUN como 7 dígitos e seta feature['id']=CD_MUN."""
+    """Carrega o JSON, garante CD_MUN como 7 dígitos, e seta feature['id']=CD_MUN."""
     if not path.exists():
         raise FileNotFoundError(f"Arquivo de municípios não encontrado: {path}")
     with open(path, "r", encoding="utf-8") as f:
@@ -66,31 +77,34 @@ def carregar_geojson_cdmun(path: Path):
     else:
         raise ValueError("JSON não é FeatureCollection nem lista de features.")
 
+    cand_keys = ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","ID","codigo","code"]
     new_feats = []
+    c_ok = 0
     for ft in feats:
         props = (ft.get("properties") or {}).copy()
+        # acha algum código
         cd = None
-        for k in ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","ID","codigo","code"]:
-            if props.get(k):
-                cd = props[k]; break
-        if not cd and ft.get("id"):
+        for k in cand_keys:
+            if k in props and str(props[k]).strip():
+                cd = props[k]
+                break
+        if cd is None and "id" in ft and str(ft["id"]).strip():
             cd = ft["id"]
-        if not cd:
+
+        if cd is None:
             continue
 
         cd_str = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
+        props["CD_MUN"] = cd_str
         nm = props.get("NM_MUN") or props.get("name") or props.get("NOME") or None
         props = {"CD_MUN": cd_str, **({"NM_MUN": nm} if nm else {})}
-
-        new_feats.append({
-            "type": "Feature",
-            "id": cd_str,                 # <<< ponto-chave para featureidkey="id"
-            "properties": props,
-            "geometry": ft.get("geometry")
-        })
+        ft2 = {"type": "Feature", "properties": props, "geometry": ft.get("geometry")}
+        ft2["id"] = cd_str  # chave direta para featureidkey="id"
+        new_feats.append(ft2)
+        c_ok += 1
 
     gj["features"] = new_feats
-    print(f"[GEO] features válidas: {len(new_feats)}")
+    print(f"[GEO] features válidas: {c_ok}")
     return gj
 
 def lookup_nomes_from_geojson(gj):
@@ -103,7 +117,8 @@ def lookup_nomes_from_geojson(gj):
         nm = None
         for k in name_keys:
             if k in p and str(p[k]).strip():
-                nm = str(p[k]).strip(); break
+                nm = str(p[k]).strip()
+                break
         if cd and nm:
             d[cd] = nm.title()
     d.setdefault("5300108", "Brasília")
@@ -181,13 +196,13 @@ for ft in GJ.get("features", []):
         BBOX_BY_MUN[cd] = bb
 
 # Deriva UF/Região e nomes
-base["CD_MUN"] = z7(base["CD_MUN"]).astype(str)
-uf_by_cd = base["CD_MUN"].str[:2].map(PREFIXO_UF)
-base["SIGLA_UF"]  = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
+base["CD_MUN"]   = z7(base["CD_MUN"]).astype(str)
+uf_by_cd         = base["CD_MUN"].str[:2].map(PREFIXO_UF)
+base["SIGLA_UF"] = base.get("SIGLA_UF", uf_by_cd).fillna(uf_by_cd).astype(str).str.strip().str.upper()
 base["NM_REGIAO"] = base.get("NM_REGIAO", base["SIGLA_UF"].map(UF_REGIAO)).fillna(base["SIGLA_UF"].map(UF_REGIAO))
-base["NM_MUN"]    = base.get("NM_MUN", base["CD_MUN"].map(NOME_MUN_LOOKUP))
-base["NM_MUN"]    = base["NM_MUN"].fillna(base["CD_MUN"].map(NOME_MUN_LOOKUP))
-base["NM_MUN"]    = base["NM_MUN"].fillna("Município " + base["CD_MUN"])
+base["NM_MUN"] = base.get("NM_MUN", base["CD_MUN"].map(NOME_MUN_LOOKUP))
+base["NM_MUN"] = base["NM_MUN"].fillna(base["CD_MUN"].map(NOME_MUN_LOOKUP))
+base["NM_MUN"] = base["NM_MUN"].fillna("Município " + base["CD_MUN"])
 
 base["UF_KEY"]  = base["SIGLA_UF"]
 base["REG_KEY"] = norm_key(base["NM_REGIAO"])
@@ -429,7 +444,10 @@ def cb_munis(reg_key, uf_keys, clickData, mval):
         if clicked not in valid:
             clicked = None
 
-    val = clicked if clicked else (mval if (mval in valid) else None)
+    if clicked:
+        val = clicked
+    else:
+        val = mval if (mval in valid) else None
     return ops, val
 
 @callback(
@@ -477,68 +495,64 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     vis["CD_MUN"] = vis["CD_MUN"].astype(str).str.zfill(7)
     vis["muni_label"] = vis["NM_MUN"].astype(str) + " / " + vis["SIGLA_UF"].astype(str)
 
-    # GeoJSON subset + fallback
-    ids_set = set(vis["CD_MUN"].unique())
+    ids_set = set(vis["CD_MUN"].unique().tolist())
     feats_sub = [ft for ft in GJ.get("features", []) if str(ft.get("id","")).zfill(7) in ids_set]
-    if not feats_sub:
-        feats_sub = GJ.get("features", [])
     GJ_SUB = {"type":"FeatureCollection","features":feats_sub}
 
-    print(f"[MAP] vis rows: {len(vis)} | ids únicos: {len(ids_set)} | feats_sub: {len(feats_sub)}")
+    print(f"[MAP] vis rows: {len(vis)} | ids vis únicos: {len(ids_set)} | feats GJ_SUB: {len(feats_sub)}")
 
-    # Fallback de cor
-    color_series = vis[color_col]
-    if color_series.dropna().empty:
-        vis["_fallback_color"] = "Sem dado"
-        color_col_plot = "_fallback_color"
-        cmap_plot = {"Sem dado": "#9CA3AF"}
-        orders_plot = ["Sem dado"]
-    else:
-        color_col_plot = color_col
-        cmap_plot = cmap
-        orders_plot = ordem
-
-    use_maplibre = bool(int(os.environ.get("USE_MAPLIBRE", "0")))
-    if not use_maplibre:
-        fig_map = px.choropleth_mapbox(
-            vis,
-            geojson=GJ_SUB,
-            locations="CD_MUN",
-            featureidkey="id",  # <<< casa com feature["id"]
-            color=color_col_plot,
-            color_discrete_map=cmap_plot,
-            hover_name="muni_label",
-            custom_data=["EHF","GeoSES","risk_index"],
-            category_orders={color_col_plot: orders_plot},
-            mapbox_style="carto-positron",
-            center={"lat": -15.7, "lon": -47.9},
-            zoom=3.2,
-            opacity=0.85
-        )
-    else:
-        fig_map = px.choropleth_map(
-            vis,
-            geojson=GJ_SUB,
-            locations="CD_MUN",
-            featureidkey="id",
-            color=color_col_plot,
-            color_discrete_map=cmap_plot,
-            hover_name="muni_label",
-            custom_data=["EHF","GeoSES","risk_index"],
-            category_orders={color_col_plot: orders_plot},
-            scope="south america",
-            center={"lat": -15.7, "lon": -47.9},
-        )
-        fig_map.update_geos(fitbounds="locations", visible=False)
-
+    # ---------- CAMADA 1: tapete "Normal" ----------
+    vis_base = vis.copy()
+    vis_base["_layer"] = "Normal"
+    fig_map = px.choropleth_mapbox(
+        vis_base,
+        geojson=GJ_SUB,
+        locations="CD_MUN",
+        featureidkey="id",
+        color="_layer",
+        color_discrete_map={"Normal": "#A5D6A7"},
+        hover_name="muni_label",
+        custom_data=["EHF","GeoSES","risk_index"],
+        mapbox_style="carto-positron",
+        center={"lat": -15.7, "lon": -47.9},
+        zoom=3.2,
+        opacity=0.55
+    )
     fig_map.update_traces(
-        marker_line_width=0.20, marker_line_color="#000000",
+        marker_line_width=0.8, marker_line_color="#374151",
         hovertemplate="<b>%{hovertext}</b><br>"
                       "EHF: %{customdata[0]:.1f}<br>"
                       "GeoSES: %{customdata[1]:.2f}<br>"
                       "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
     )
-    fig_map.update_layout(clickmode="event+select")
+
+    # ---------- CAMADA 2: alertas (não-Normal) ----------
+    vis_alerta = vis[vis[color_col] != "Normal"].copy()
+    if not vis_alerta.empty:
+        fig_top = px.choropleth_mapbox(
+            vis_alerta,
+            geojson=GJ_SUB,
+            locations="CD_MUN",
+            featureidkey="id",
+            color=color_col,
+            color_discrete_map=cmap,
+            category_orders={color_col: ordem},
+            hover_name="muni_label",
+            custom_data=["EHF","GeoSES","risk_index"],
+            mapbox_style="carto-positron",
+            center={"lat": -15.7, "lon": -47.9},
+            zoom=3.2,
+            opacity=0.85
+        )
+        fig_top.update_traces(
+            marker_line_width=0.9, marker_line_color="#111827",
+            hovertemplate="<b>%{hovertext}</b><br>"
+                          "EHF: %{customdata[0]:.1f}<br>"
+                          "GeoSES: %{customdata[1]:.2f}<br>"
+                          "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
+        )
+        for tr in fig_top.data:
+            fig_map.add_trace(tr)
 
     # Auto-zoom conforme filtros
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
@@ -552,6 +566,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     fig_map.update_layout(
         margin={"r":0,"t":0,"l":0,"b":0},
         legend_title_text=legend_title,
+        clickmode="event+select",
         uirevision=f"reg:{reg_key}|ufs:{','.join(uf_keys)}|mun:{muni_key or ''}"
     )
 
@@ -587,10 +602,10 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     # ====== CARDS ======
     cont = vis[color_col].value_counts().reindex(CLASS_ORDER if layer!="risk" else RISK_ORDER, fill_value=0)
     cards = []
-    ordem = (RISK_ORDER if layer=="risk" and HAS_RISK else CLASS_ORDER)
-    paleta = (RISK_COLORS if layer=="risk" and HAS_RISK else COLOR_MAP)
-    for lbl in ordem:
-        val = int(cont.get(lbl, 0)); cor = paleta.get(lbl, "#6b7280")
+    ordem_cards = (RISK_ORDER if layer=="risk" and HAS_RISK else CLASS_ORDER)
+    paleta_cards = (RISK_COLORS if layer=="risk" and HAS_RISK else COLOR_MAP)
+    for lbl in ordem_cards:
+        val = int(cont.get(lbl, 0)); cor = paleta_cards.get(lbl, "#6b7280")
         cards.append(
             html.Div([
                 html.Div(lbl, style={"fontWeight":"600","fontSize":"13px","marginBottom":"4px","textAlign":"center"}),
@@ -718,8 +733,11 @@ def exportar_risco_full(n_clicks):
 
 # ================== RUN ==================
 if __name__ == "__main__":
+    import os
     PORT = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
