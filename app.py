@@ -3,38 +3,26 @@ import json
 from pathlib import Path
 from datetime import date
 import math
+import os
 
 import numpy as np
 import pandas as pd
 from dash import Dash, dcc, html, Input, Output, State, callback, no_update
 import plotly.express as px
-import plotly.graph_objects as go  # <- para combinarmos camadas
+import plotly.graph_objects as go  # <- para montar o mapa em camadas
 
 # ================== CAMINHOS (RELATIVOS) ==================
 PASTA = Path(__file__).parent
 ARQ_PREV = PASTA / "previsao_brasil_5dias.xlsx"
 ARQ_ATTR = PASTA / "arquivo_completo_brasil.xlsx"
-
-# Somente o JSON simplificado
-GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"
+GEOJSON_PATH = PASTA / "municipios_br_simplificado.json"  # somente o JSON simplificado
 
 # ================== PALETAS & ORDENS ==================
 CLASS_ORDER = ["Normal", "Baixa intensidade", "Severa", "Extrema"]
-COLOR_MAP   = {
-    "Normal":"#A5D6A7",              # verde mais claro para o "tapete"
-    "Baixa intensidade":"#F1C40F",
-    "Severa":"#E67E22",
-    "Extrema":"#C0392B"
-}
+COLOR_MAP   = {"Normal":"#2E7D32","Baixa intensidade":"#F1C40F","Severa":"#E67E22","Extrema":"#C0392B"}
 
 RISK_ORDER  = ["Normal","Baixo","Moderado","Alto","Muito alto"]
-RISK_COLORS = {
-    "Normal":"#A5D6A7",
-    "Baixo":"#65A30D",
-    "Moderado":"#FACC15",
-    "Alto":"#FB923C",
-    "Muito alto":"#DC2626"
-}
+RISK_COLORS = {"Normal":"#2E7D32","Baixo":"#65A30D","Moderado":"#FACC15","Alto":"#FB923C","Muito alto":"#DC2626"}
 
 BARS_COLORS = {"Tmín":"#BFDBFE","Tméd":"#60A5FA","Tmáx":"#1E3A8A"}
 
@@ -62,13 +50,15 @@ def norm_key(x: pd.Series) -> pd.Series:
     return s
 
 def carregar_geojson_cdmun(path: Path):
-    """Carrega o JSON, garante CD_MUN como 7 dígitos, e seta feature['id']=CD_MUN."""
+    """
+    Carrega o JSON, garante CD_MUN como 7 dígitos e coloca feature['id'] = CD_MUN.
+    Retorna um FeatureCollection enxuto (CD_MUN e, se houver, NM_MUN).
+    """
     if not path.exists():
         raise FileNotFoundError(f"Arquivo de municípios não encontrado: {path}")
     with open(path, "r", encoding="utf-8") as f:
         gj = json.load(f)
 
-    # aceita FeatureCollection ou lista de features
     if isinstance(gj, dict) and "features" in gj:
         feats = gj.get("features", [])
     elif isinstance(gj, list):
@@ -79,10 +69,8 @@ def carregar_geojson_cdmun(path: Path):
 
     cand_keys = ["CD_MUN","CD_GEOCMU","CD_GEOCODI","CD_MUNIC","CD_IBGE","GEOCODIGO","IBGE","id","ID","codigo","code"]
     new_feats = []
-    c_ok = 0
     for ft in feats:
         props = (ft.get("properties") or {}).copy()
-        # acha algum código
         cd = None
         for k in cand_keys:
             if k in props and str(props[k]).strip():
@@ -90,21 +78,16 @@ def carregar_geojson_cdmun(path: Path):
                 break
         if cd is None and "id" in ft and str(ft["id"]).strip():
             cd = ft["id"]
-
         if cd is None:
             continue
 
         cd_str = "".join(ch for ch in str(cd) if ch.isdigit()).zfill(7)
-        props["CD_MUN"] = cd_str
         nm = props.get("NM_MUN") or props.get("name") or props.get("NOME") or None
-        props = {"CD_MUN": cd_str, **({"NM_MUN": nm} if nm else {})}
-        ft2 = {"type": "Feature", "properties": props, "geometry": ft.get("geometry")}
-        ft2["id"] = cd_str  # chave direta para featureidkey="id"
-        new_feats.append(ft2)
-        c_ok += 1
+        props_min = {"CD_MUN": cd_str, **({"NM_MUN": nm} if nm else {})}
+        new_feats.append({"type":"Feature","id":cd_str,"properties":props_min,"geometry":ft.get("geometry")})
 
     gj["features"] = new_feats
-    print(f"[GEO] features válidas: {c_ok}")
+    print(f"[GEO] features válidas: {len(new_feats)}")
     return gj
 
 def lookup_nomes_from_geojson(gj):
@@ -189,8 +172,7 @@ NOME_MUN_LOOKUP = lookup_nomes_from_geojson(GJ)
 # BBOX por município
 BBOX_BY_MUN = {}
 for ft in GJ.get("features", []):
-    props = ft.get("properties", {}) or {}
-    cd = str(props.get("CD_MUN","")).zfill(7)
+    cd = str((ft.get("properties") or {}).get("CD_MUN","")).zfill(7)
     bb = _geom_bbox(ft.get("geometry"))
     if cd and bb:
         BBOX_BY_MUN[cd] = bb
@@ -249,7 +231,7 @@ def build_combined_risk(df: pd.DataFrame):
         return df, False
     d = df.copy()
     geoses_num = pd.to_numeric(d["GeoSES"], errors="coerce")
-    d["V"] = ((1 - geoses_num) / 2).clip(0, 1)
+    d["V"] = ((1 - geoses_num) / 2).clip(0, 1)  # 0=baixa,1=alta
     H = (d["EHF"].clip(lower=0)) / d.get("EHF99").replace(0, np.nan)
     d["H_norm"] = H.clip(0, 1).fillna(0)
     d["risk_index"] = 0.5*d["H_norm"] + 0.5*d["V"]
@@ -433,7 +415,6 @@ def cb_munis(reg_key, uf_keys, clickData, mval):
         df = df[df["REG_KEY"] == reg_key]
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
-
     df = df.dropna(subset=["CD_MUN"]).drop_duplicates("CD_MUN").sort_values(["UF_KEY","NM_MUN"])
     ops = [{"label": f"{r.NM_MUN} / {r.UF_KEY}", "value": r.CD_MUN} for r in df.itertuples()]
     valid = {o["value"] for o in ops}
@@ -443,11 +424,7 @@ def cb_munis(reg_key, uf_keys, clickData, mval):
         clicked = str(clickData["points"][0].get("location") or "")
         if clicked not in valid:
             clicked = None
-
-    if clicked:
-        val = clicked
-    else:
-        val = mval if (mval in valid) else None
+    val = clicked if clicked else (mval if (mval in valid) else None)
     return ops, val
 
 @callback(
@@ -462,23 +439,25 @@ def cb_munis(reg_key, uf_keys, clickData, mval):
     Input("layer","value"),
 )
 def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
+    # ------- Data selecionada -------
     if not DATES:
         return px.scatter(), px.bar(), [], []
     dia = DATES[idx_date] if 0 <= idx_date < len(DATES) else DATES[-1]
     uf_keys = uf_keys or []
 
+    # ------- Base filtrada -------
     df = base[base["data"].dt.date == dia].copy()
     if reg_key:
         df = df[df["REG_KEY"] == reg_key]
     if uf_keys:
         df = df[df["UF_KEY"].isin(uf_keys)]
-
     df["CD_MUN"] = z7(df["CD_MUN"]).astype(str)
 
     filter_muni_active = bool(muni_key)
     if filter_muni_active:
         df = df[df["CD_MUN"] == muni_key]
 
+    # ------- Coluna de cor -------
     if layer == "risk" and HAS_RISK:
         color_col = "risk_class"; cmap = RISK_COLORS; ordem = RISK_ORDER
         legend_title = "Risco combinado (EHF + GeoSES)"
@@ -495,41 +474,19 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     vis["CD_MUN"] = vis["CD_MUN"].astype(str).str.zfill(7)
     vis["muni_label"] = vis["NM_MUN"].astype(str) + " / " + vis["SIGLA_UF"].astype(str)
 
+    # ------- GeoJSON apenas com os IDs visíveis -------
     ids_set = set(vis["CD_MUN"].unique().tolist())
     feats_sub = [ft for ft in GJ.get("features", []) if str(ft.get("id","")).zfill(7) in ids_set]
     GJ_SUB = {"type":"FeatureCollection","features":feats_sub}
-
     print(f"[MAP] vis rows: {len(vis)} | ids vis únicos: {len(ids_set)} | feats GJ_SUB: {len(feats_sub)}")
 
-    # ---------- CAMADA 1: tapete "Normal" ----------
-    vis_base = vis.copy()
-    vis_base["_layer"] = "Normal"
-    fig_map = px.choropleth_mapbox(
-        vis_base,
-        geojson=GJ_SUB,
-        locations="CD_MUN",
-        featureidkey="id",
-        color="_layer",
-        color_discrete_map={"Normal": "#A5D6A7"},
-        hover_name="muni_label",
-        custom_data=["EHF","GeoSES","risk_index"],
-        mapbox_style="carto-positron",
-        center={"lat": -15.7, "lon": -47.9},
-        zoom=3.2,
-        opacity=0.55
-    )
-    fig_map.update_traces(
-        marker_line_width=0.8, marker_line_color="#374151",
-        hovertemplate="<b>%{hovertext}</b><br>"
-                      "EHF: %{customdata[0]:.1f}<br>"
-                      "GeoSES: %{customdata[1]:.2f}<br>"
-                      "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
-    )
+    # ============ MAPA EM DUAS CAMADAS ============
+    fig = go.Figure()
 
-    # ---------- CAMADA 2: alertas (não-Normal) ----------
+    # 1) ALERTAS (não-Normal) – vem primeiro (fica por cima visualmente)
     vis_alerta = vis[vis[color_col] != "Normal"].copy()
     if not vis_alerta.empty:
-        fig_top = px.choropleth_mapbox(
+        fig_alert = px.choropleth_mapbox(
             vis_alerta,
             geojson=GJ_SUB,
             locations="CD_MUN",
@@ -542,32 +499,61 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
             mapbox_style="carto-positron",
             center={"lat": -15.7, "lon": -47.9},
             zoom=3.2,
-            opacity=0.85
+            opacity=0.88
         )
-        fig_top.update_traces(
-            marker_line_width=0.9, marker_line_color="#111827",
+        fig_alert.update_traces(
+            marker_line_width=0.9,
+            marker_line_color="#111827",
             hovertemplate="<b>%{hovertext}</b><br>"
                           "EHF: %{customdata[0]:.1f}<br>"
                           "GeoSES: %{customdata[1]:.2f}<br>"
                           "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
         )
-        for tr in fig_top.data:
-            fig_map.add_trace(tr)
+        for tr in fig_alert.data:
+            fig.add_trace(tr)
 
-    # Auto-zoom conforme filtros
+    # 2) TAPETE “NORMAL” – vem por último para ficar por BAIXO
+    vis_base = vis.copy()
+    vis_base["_layer"] = "Normal"
+    fig_base = px.choropleth_mapbox(
+        vis_base,
+        geojson=GJ_SUB,
+        locations="CD_MUN",
+        featureidkey="id",
+        color="_layer",
+        color_discrete_map={"Normal": COLOR_MAP.get("Normal", "#A5D6A7")},
+        hover_name="muni_label",
+        custom_data=["EHF","GeoSES","risk_index"],
+        mapbox_style="carto-positron",
+        center={"lat": -15.7, "lon": -47.9},
+        zoom=3.2,
+        opacity=0.45
+    )
+    fig_base.update_traces(
+        marker_line_width=0.0,
+        hovertemplate="<b>%{hovertext}</b><br>"
+                      "EHF: %{customdata[0]:.1f}<br>"
+                      "GeoSES: %{customdata[1]:.2f}<br>"
+                      "Risco combinado: %{customdata[2]:.2f}<extra></extra>"
+    )
+    for tr in fig_base.data:
+        fig.add_trace(tr)
+
+    # Auto-zoom
     apply_zoom = bool(reg_key) or bool(uf_keys) or bool(muni_key)
     if apply_zoom and not vis.empty:
         target_cds = [muni_key] if filter_muni_active else vis["CD_MUN"].astype(str).unique().tolist()
         bbox = _union_bbox([BBOX_BY_MUN.get(cd) for cd in target_cds])
         if bbox:
             center, z = bbox_to_center_zoom(bbox, width=1100, height=650, padding=0.06)
-            fig_map.update_layout(mapbox_center=center, mapbox_zoom=z)
+            fig.update_layout(mapbox_center=center, mapbox_zoom=z)
 
-    fig_map.update_layout(
+    fig.update_layout(
         margin={"r":0,"t":0,"l":0,"b":0},
         legend_title_text=legend_title,
         clickmode="event+select",
-        uirevision=f"reg:{reg_key}|ufs:{','.join(uf_keys)}|mun:{muni_key or ''}"
+        legend_traceorder="normal",
+        uirevision=f"reg:{reg_key}|ufs:{','.join(uf_keys or [])}|mun:{muni_key or ''}"
     )
 
     # ====== BARRAS MUNICÍPIO ======
@@ -602,10 +588,10 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
     # ====== CARDS ======
     cont = vis[color_col].value_counts().reindex(CLASS_ORDER if layer!="risk" else RISK_ORDER, fill_value=0)
     cards = []
-    ordem_cards = (RISK_ORDER if layer=="risk" and HAS_RISK else CLASS_ORDER)
-    paleta_cards = (RISK_COLORS if layer=="risk" and HAS_RISK else COLOR_MAP)
-    for lbl in ordem_cards:
-        val = int(cont.get(lbl, 0)); cor = paleta_cards.get(lbl, "#6b7280")
+    ordem = (RISK_ORDER if layer=="risk" and HAS_RISK else CLASS_ORDER)
+    paleta = (RISK_COLORS if layer=="risk" and HAS_RISK else COLOR_MAP)
+    for lbl in ordem:
+        val = int(cont.get(lbl, 0)); cor = paleta.get(lbl, "#6b7280")
         cards.append(
             html.Div([
                 html.Div(lbl, style={"fontWeight":"600","fontSize":"13px","marginBottom":"4px","textAlign":"center"}),
@@ -630,7 +616,7 @@ def cb_viz(idx_date, reg_key, uf_keys, muni_key, layer):
                           "borderLeft":"10px solid "+cor,"borderRadius":"10px","padding":"8px"})
             )
 
-    return fig_map, fig_bar, cards, ehf_boxes
+    return fig, fig_bar, cards, ehf_boxes
 
 # ===== CONSULTA POR CLASSE (listas) =====
 @callback(
@@ -733,9 +719,10 @@ def exportar_risco_full(n_clicks):
 
 # ================== RUN ==================
 if __name__ == "__main__":
-    import os
     PORT = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=PORT)
+
+
 
 
 
